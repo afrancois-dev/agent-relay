@@ -1,0 +1,164 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  APP_IMAGE: agent-relay
+  KIND_CLUSTER: agent-relay
+  K8S_NAMESPACE: agent-relay
+  DEPLOYMENT: agent-relay
+  CONTAINER: agent-relay
+  # Host port for the throwaway CI PostgreSQL (kept off 5432 to avoid clashes).
+  CI_PG_PORT: "55432"
+  CI_PG_USER: relay
+  CI_PG_PASSWORD: relay
+  CI_PG_DB: agentrelay
+  CI_PG_TEST_DB: agentrelay_test
+
+jobs:
+  # 1. Run the starter's tests and the integration test against PostgreSQL.
+  test:
+    name: Test against PostgreSQL
+    runs-on: ubuntu-latest
+    env:
+      RELAY_DATABASE_URL: postgresql+psycopg://relay:relay@127.0.0.1:55432/agentrelay_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL
+        run: |
+          docker rm -f ci-postgres >/dev/null 2>&1 || true
+          docker run -d --name ci-postgres \
+            -e POSTGRES_USER="${CI_PG_USER}" \
+            -e POSTGRES_PASSWORD="${CI_PG_PASSWORD}" \
+            -e POSTGRES_DB="${CI_PG_DB}" \
+            -p "${CI_PG_PORT}:5432" postgres:17-alpine
+
+          ready=0
+          for i in $(seq 1 60); do
+            if docker exec ci-postgres psql -U "${CI_PG_USER}" -d "${CI_PG_DB}" \
+                -tAc 'select 1' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${ready}" != "1" ]; then
+            echo "PostgreSQL did not become ready in time"
+            docker logs ci-postgres
+            exit 1
+          fi
+
+          # Create the scratch test database idempotently.
+          if ! docker exec ci-postgres psql -U "${CI_PG_USER}" -d "${CI_PG_DB}" -tAc \
+              "SELECT 1 FROM pg_database WHERE datname = '${CI_PG_TEST_DB}'" | grep -q 1; then
+            docker exec ci-postgres psql -U "${CI_PG_USER}" -d "${CI_PG_DB}" \
+              -c "CREATE DATABASE ${CI_PG_TEST_DB}"
+          fi
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Run unit and integration tests
+        run: uv run pytest -q
+
+      - name: PostgreSQL logs on failure
+        if: failure()
+        run: docker logs ci-postgres
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f ci-postgres || true
+
+  # 2. Build a new image with a unique tag (only when tests passed).
+  build:
+    name: Build image
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tag
+        name: Compute unique tag
+        run: echo "tag=ci-$(git rev-parse --short HEAD)-$(date +%s)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Docker image
+        run: docker build -t "${APP_IMAGE}:${{ steps.tag.outputs.tag }}" .
+
+  # 3. Deploy to the local kind cluster (only when the build succeeded).
+  deploy:
+    name: Deploy to kind
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kind and kubectl
+        run: |
+          # Install into the runner-owned home dir: /usr/local/bin is not
+          # writable on GitHub-hosted runners.
+          mkdir -p "${HOME}/.local/bin"
+          curl -sSLo "${HOME}/.local/bin/kind" https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          chmod +x "${HOME}/.local/bin/kind"
+          curl -sSLo "${HOME}/.local/bin/kubectl" https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
+          chmod +x "${HOME}/.local/bin/kubectl"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Check for a kind cluster
+        id: cluster
+        run: |
+          if kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER}"; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "No kind cluster '${KIND_CLUSTER}' found; skipping deployment."
+            echo "Run this workflow locally with act (or on a self-hosted runner with kind)."
+          fi
+
+      - name: Verify Docker and kind cluster access
+        if: steps.cluster.outputs.available == 'true'
+        run: |
+          docker info >/dev/null
+          kind get clusters
+          # Build a kubeconfig from the running kind cluster (no host mount needed).
+          kind export kubeconfig --name "${KIND_CLUSTER}"
+          kubectl cluster-info
+          kubectl -n "${K8S_NAMESPACE}" get pods
+
+      - name: Load the new image into kind
+        if: steps.cluster.outputs.available == 'true'
+        run: kind load docker-image "${APP_IMAGE}:${IMAGE_TAG}" --name "${KIND_CLUSTER}"
+
+      - name: Roll out the new image
+        if: steps.cluster.outputs.available == 'true'
+        run: |
+          kubectl -n "${K8S_NAMESPACE}" set image \
+            deployment/${DEPLOYMENT} ${CONTAINER}="${APP_IMAGE}:${IMAGE_TAG}"
+          kubectl -n "${K8S_NAMESPACE}" rollout status \
+            deployment/${DEPLOYMENT} --timeout=180s
+          kubectl -n "${K8S_NAMESPACE}" get pods -o wide
+
+      - name: Smoke-test the deployed dashboard
+        if: steps.cluster.outputs.available == 'true'
+        run: |
+          kubectl -n "${K8S_NAMESPACE}" port-forward svc/agent-relay 18000:8000 >/tmp/pf.log 2>&1 &
+          PF=$!
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:18000/ready >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "--- dashboard heading ---"
+          curl -s http://127.0.0.1:18000/ | grep -o '<h1>[^<]*</h1>'
+          echo "--- /ready ---"
+          curl -s http://127.0.0.1:18000/ready
+          kill "${PF}"
