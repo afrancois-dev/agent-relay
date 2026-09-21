@@ -98,6 +98,77 @@ def test_protocol_idempotency_terminal_retry_and_auth_boundary():
         assert "claim_token" not in attempts["items"][0]
 
 
+def test_acceptance_scenario_exchange_task_and_result():
+    """SPEC acceptance scenario 1: two agents exchange a task and its result.
+
+    Drives the real HTTP API and the real database (not the storage layer
+    directly), then confirms both participants observe the terminal state the
+    dashboard reads through ``GET /tasks``.
+    """
+
+    with TestClient(main.app) as client:
+        sender, sender_headers = register(client, "alice-reviewer")
+        recipient, recipient_headers = register(client, "bob-worker")
+
+        sent = client.post(
+            "/api/v1/tasks",
+            headers={**sender_headers, "Idempotency-Key": "scenario-1"},
+            json={"to": recipient["agent_id"], "input": "review this python function"},
+        )
+        assert sent.status_code == 201
+        task_id = sent.json()["task_id"]
+        assert sent.json()["status"] == "queued"
+
+        queued = client.get(f"/api/v1/tasks/{task_id}", headers=sender_headers).json()
+        assert queued["status"] == "queued"
+        assert queued["from"] == sender["agent_id"]
+        assert queued["to"] == recipient["agent_id"]
+        assert queued["output"] is None and queued["finished_at"] is None
+
+        claim = client.post(
+            "/api/v1/tasks/claim",
+            headers=recipient_headers,
+            json={"worker_id": "bob-laptop-1", "wait_seconds": 0},
+        )
+        assert claim.status_code == 200
+        claim_data = claim.json()
+        assert claim_data["task_id"] == task_id
+        assert claim_data["from"] == sender["agent_id"]
+        assert claim_data["input"] == "review this python function"
+        assert claim_data["attempt"] == 1
+        assert claim_data["claim_token"]
+        assert claim_data["lease_expires_at"]
+
+        # The recipient executes locally (the starter's engine is input.upper()).
+        complete = client.post(
+            f"/api/v1/tasks/{task_id}/complete",
+            headers=recipient_headers,
+            json={"claim_token": claim_data["claim_token"], "output": claim_data["input"].upper()},
+        )
+        assert complete.status_code == 200
+
+        # The sender reads the result through the same endpoint the dashboard uses.
+        result = client.get(f"/api/v1/tasks/{task_id}", headers=sender_headers).json()
+        assert result["status"] == "completed"
+        assert result["output"] == "REVIEW THIS PYTHON FUNCTION"
+        assert result["error"] is None
+        assert result["attempt_count"] == 1
+        assert result["finished_at"] is not None
+
+        # Both participants see it in their dashboard task lists.
+        sent_list = client.get("/api/v1/tasks?direction=sent", headers=sender_headers).json()
+        received_list = client.get("/api/v1/tasks?direction=received", headers=recipient_headers).json()
+        assert [t["task_id"] for t in sent_list["items"]] == [task_id]
+        assert [t["task_id"] for t in received_list["items"]] == [task_id]
+        assert sent_list["items"][0]["status"] == "completed"
+
+        attempts = client.get(f"/api/v1/tasks/{task_id}/attempts", headers=sender_headers).json()
+        assert [(a["attempt"], a["outcome"], a["worker_id"]) for a in attempts["items"]] == [
+            (1, "completed", "bob-laptop-1")
+        ]
+        assert "claim_token" not in attempts["items"][0]
+
+
 def test_sqlite_atomic_claims_distribute_without_overlap():
     with TestClient(main.app) as client:
         _sender, sender_headers = register(client, "sender")

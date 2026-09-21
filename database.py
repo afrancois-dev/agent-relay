@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, select
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -134,6 +134,12 @@ def _is_sqlite(url: str) -> bool:
     return url.startswith("sqlite")
 
 
+IS_SQLITE = _is_sqlite(DATABASE_URL)
+
+# Arbitrary constant key for PostgreSQL's transaction-scoped advisory lock.
+PG_ADVISORY_LOCK_KEY = 0x52454C41  # "RELA"
+
+
 engine_kwargs: dict[str, Any] = {"future": True, "pool_pre_ping": True}
 if _is_sqlite(DATABASE_URL):
     engine_kwargs.update({"connect_args": {"check_same_thread": False, "timeout": 30}})
@@ -177,14 +183,33 @@ def db_session() -> Generator[Session, None, None]:
 
 @contextmanager
 def immediate_transaction() -> Generator[Session, None, None]:
-    """Run one SQLite writer transaction before selecting or changing work.
+    """Run one serialized writer transaction before selecting or changing work.
 
     SQLite does not support PostgreSQL's ``FOR UPDATE SKIP LOCKED``.  A
     ``BEGIN IMMEDIATE`` writer reservation serializes claims (and recovery or
     terminal submissions) across API processes, giving each task one active
-    lease.  This is the intentionally isolated seam for a future PostgreSQL
-    implementation.
+    lease.
+
+    On PostgreSQL the same single-writer guarantee maps to a transaction-scoped
+    advisory lock: it is acquired before the read-modify-write and released at
+    COMMIT/ROLLBACK, so claim, heartbeat, terminal submission, and recovery stay
+    mutually exclusive exactly as they are on SQLite.  ``storage`` and the HTTP
+    protocol are unchanged by this port.  This function remains the only place
+    that knows a backend-specific transaction detail.
     """
+
+    if not IS_SQLITE:
+        session = SessionLocal()
+        try:
+            session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": PG_ADVISORY_LOCK_KEY})
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+        return
 
     connection = engine.connect()
     session = Session(bind=connection, expire_on_commit=False, autoflush=True)
