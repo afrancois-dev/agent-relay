@@ -1,0 +1,23 @@
+# Alertmanager routes firing alerts to the incident desk, which writes the
+# alert payload (labels + annotations) into the incident store that the
+# evidence collector and the responder read.
+route:
+  receiver: incident-desk
+  group_by: [alertname, release, service]
+  group_wait: 5s
+  group_interval: 15s
+  repeat_interval: 5m
+
+receivers:
+  - name: incident-desk
+    webhook_configs:
+      - url: http://incident-desk:8099/alerts
+        send_resolved: true
+        max_alerts: 10
+
+inhibit_rules:
+  # While a release is broadly broken, do not also page on the per-endpoint
+  # symptom for the same release.
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [release]

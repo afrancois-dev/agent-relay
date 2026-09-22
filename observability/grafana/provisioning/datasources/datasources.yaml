@@ -1,0 +1,42 @@
+# Grafana is where metrics, logs, and traces are viewed together. All three
+# datasources are provisioned as code so the investigation UI is reproducible.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    uid: prometheus
+    jsonData:
+      timeInterval: 5s
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki
+    jsonData:
+      derivedFields:
+        - name: trace_id
+          matcherRegex: '"trace_id"\s*:\s*"(\w+)"'
+          datasourceUid: tempo
+          url: '$${__value.raw}'
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-2m'
+        spanEndTimeShift: '2m'
+        filterByTraceID: true
+        filterBySpanID: false
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true

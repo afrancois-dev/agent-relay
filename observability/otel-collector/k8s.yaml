@@ -1,0 +1,99 @@
+# In-cluster collector. It runs in the host network namespace so it can reach
+# the compose stack (Prometheus/Loki/Tempo/Alertmanager) on 127.0.0.1, and so
+# the API/responder can export OTLP to it on the node address.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: agent-relay
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+        spike_limit_mib: 64
+      batch:
+        timeout: 2s
+        send_batch_size: 1024
+      attributes/scrub:
+        actions:
+          - key: authorization
+            action: delete
+          - key: token
+            action: delete
+    exporters:
+      otlp/tempo:
+        endpoint: tempo:4317
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        resource_to_telemetry_conversion:
+          enabled: true
+      otlphttp/loki:
+        endpoint: http://loki:3100/otlp
+        tls:
+          insecure: true
+      debug:
+        verbosity: basic
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: warn
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/scrub, batch]
+          exporters: [otlp/tempo, debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus, debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/scrub, batch]
+          exporters: [otlphttp/loki, debug]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  namespace: agent-relay
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.116.1
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - containerPort: 4318
+            - containerPort: 4317
+            - containerPort: 8889
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config

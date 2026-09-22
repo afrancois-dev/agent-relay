@@ -38,6 +38,17 @@ spec:
                 secretKeyRef:
                   name: db-credentials
                   key: url
+            # OTLP goes to the collector in the host network namespace.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://127.0.0.1:4318
+            - name: OTEL_SERVICE_NAME
+              value: agent-relay
+            # The release label is the join key between a symptom and the
+            # rollout that caused it; CI sets it from the image tag.
+            - name: RELAY_RELEASE
+              value: "local"
+            - name: RELAY_ENVIRONMENT
+              value: production
           # /ready queries the real tables, so it only passes once the schema is
           # present in PostgreSQL.
           readinessProbe:

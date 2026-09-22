@@ -1,0 +1,98 @@
+{
+  "at": "2026-09-22T19:42:20Z",
+  "commit": "9b43fe2",
+  "deterministic": {
+    "tool": "semgrep",
+    "config": "p/owasp-top-ten",
+    "available": true,
+    "at": "2026-09-22T19:42:20Z",
+    "findings": [
+      {
+        "check_id": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args",
+        "path": "ops/responder.py",
+        "line": 180,
+        "message": "Detected subprocess function 'run' with user controlled data. A malicious actor could leverage this to perform command injection. You may consider using 'shlex.quote()'.",
+        "severity": "ERROR",
+        "validation": "false_positive",
+        "validation_note": "The flagged env is an explicit allowlist (PATH, HOME, OPENAI_API_KEY, NO_COLOR); application secrets are not inherited. The command list is built from constants plus RESPONDER_MODEL, not from model output."
+      },
+      {
+        "check_id": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args",
+        "path": "ops/security_audit.py",
+        "line": 94,
+        "message": "Detected subprocess function 'run' with user controlled data. A malicious actor could leverage this to perform command injection. You may consider using 'shlex.quote()'.",
+        "severity": "ERROR",
+        "validation": "false_positive",
+        "validation_note": "`targets` is the constant APP_TARGETS list; SEMGREP_CONFIG is operator-set, not request data."
+      },
+      {
+        "check_id": "python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure",
+        "path": "worker.py",
+        "line": 171,
+        "message": "Detected a python logger call with a potential hardcoded secret \"saved credentials for %s to %s\" being logged. This may lead to secret credentials being exposed. Make sure that the logger is not logging  sensitive information.",
+        "severity": "WARNING",
+        "validation": "false_positive",
+        "validation_note": "The log line prints the agent_id, which is a public identifier; the token is never logged."
+      }
+    ],
+    "exit_code": 0
+  },
+  "model_review": {
+    "at": "2026-09-22T19:42:28Z",
+    "stage": "model_review",
+    "advisory_only": true,
+    "invoked": false,
+    "findings": [],
+    "note": "model review skipped (invoke=False); run with --invoke to call the headless agent"
+  },
+  "responder_capabilities": {
+    "identity": {
+      "service_account": "incident-responder",
+      "namespace": "agent-relay",
+      "token_mounted": true,
+      "audience": "kubernetes.default.svc"
+    },
+    "kubernetes_rbac": {
+      "read": [
+        "get/list pods,deployments,replicasets,events in namespace agent-relay",
+        "get configmaps in namespace agent-relay"
+      ],
+      "write": [
+        "patch deployments/agent-relay (rollout undo/restart) in namespace agent-relay",
+        "patch deployments/agent-relay/scale"
+      ],
+      "explicitly_absent": [
+        "secrets (all verbs)",
+        "pods/exec",
+        "cluster-scoped resources",
+        "other namespaces",
+        "rbac.authorization.k8s.io",
+        "persistentvolumes"
+      ]
+    },
+    "observability_credentials": {
+      "prometheus": "read-only HTTP GET (no auth) to /api/v1/query",
+      "loki": "read-only HTTP GET to /query_range",
+      "tempo": "read-only HTTP GET to /api/search",
+      "grafana": "viewer (datasource proxy only)"
+    },
+    "database_credentials": "none: the ops image does not connect to PostgreSQL",
+    "application_secrets": "none: no RELAY_ENROLLMENT_SECRET, no agent tokens",
+    "model_credentials": {
+      "provider": "openai-codex",
+      "scope": "a model API key only; it grants no infrastructure access",
+      "sandbox": "codex exec --sandbox read-only"
+    },
+    "bounded_actions": [
+      "kubectl rollout undo deployment/agent-relay (auto, only with a healthy previous release)",
+      "kubectl rollout restart deployment/agent-relay (manual tier: escalated, not executed)",
+      "kubectl scale deployment/agent-relay (manual tier: escalated, not executed)"
+    ],
+    "manifest": "k8s/ops-responder.yaml"
+  },
+  "validation": {
+    "instructions": "For each deterministic finding set validation to confirmed|false_positive|needs_human with a note. Confirm by reading the code path, not by trusting the rule or the model.",
+    "validated_by": null,
+    "validated_at": null
+  }
+}

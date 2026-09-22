@@ -1,0 +1,44 @@
+# Project Semgrep config, run alongside the pinned `p/owasp-top-ten` ruleset.
+#
+# It adds one project-specific invariant and records the validated false
+# positives so re-running the scan is stable and the exceptions are auditable.
+#
+#   semgrep scan --config observability/security/semgrep.yml \
+#     --config p/owasp-top-ten main.py database.py storage.py schemas.py \
+#     worker.py telemetry.py ops
+rules:
+  # The responder's model output is untrusted. The only place a command string
+  # may cross into execution is ops/responder.execute(), and it must come from
+  # the policy allowlist. This rule catches a future edit that pipes the model
+  # proposal directly into a shell.
+  - id: relay-model-output-not-executed
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Model output must not reach a shell.- Only ops.policy may render the
+      executed command and only ops.responder.execute may run it.
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$FUNC($PROPOSAL, ...)
+          - pattern: os.system($PROPOSAL)
+          - pattern: os.popen($PROPOSAL)
+      - metavariable-regex:
+          metavariable: $PROPOSAL
+          regex: (?i).*(proposal|model).*(command|output|cmd).*
+    metadata:
+      category: security
+      confidence: HIGH
+
+  # Long-lived application secrets must not be inherited by a model-driven
+  # child process (the headless coding agent).
+  - id: relay-agent-env-passthrough
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Do not pass os.environ to a model-driven subprocess; pass an explicit
+      allowlisted environment.
+    patterns:
+      - pattern: subprocess.$FUNC(..., env={**os.environ, ...}, ...)
+    metadata:
+      category: security
+      confidence: HIGH

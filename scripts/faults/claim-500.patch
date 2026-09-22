@@ -1,0 +1,15 @@
+--- a/main.py
++++ b/main.py
+@@ -221,6 +241,12 @@ async def claim(
+     body: ClaimRequest,
+     current=Depends(current_agent),
+ ) -> Response:
++    # Intentionally broken release for the observability exercise: an
++    # unhandled KeyError on every claim turns the hottest endpoint into a 500.
++    # Revert with `git apply -R scripts/faults/claim-500.patch`.
++    broken_release = {"claims_enabled": True}["claims_enabled_typo"]
++    if broken_release:
++        LOGGER.info("claim path reached")
+     deadline = time.monotonic() + body.wait_seconds
+     while True:
+         try:

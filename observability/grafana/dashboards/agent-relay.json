@@ -1,0 +1,90 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {"from": "now-30m", "to": "now"},
+  "title": "Agent Relay — RED, logs, traces",
+  "uid": "agent-relay-red",
+  "templating": {
+    "list": [
+      {
+        "name": "release",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(relay_http_requests_total, release)",
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Error ratio by route (release $release)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(relay_http_requests_total{status=~\"5..\", release=~\"$release\"}[1m])) / clamp_min(sum by (route) (rate(relay_http_requests_total{release=~\"$release\"}[1m])), 0.001)",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Request rate by status (release $release)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(relay_http_requests_total{release=~\"$release\"}[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "p95 latency by route (release $release)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(relay_http_request_duration_seconds_bucket{release=~\"$release\"}[5m])))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Task events (release $release)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (event) (rate(relay_task_events_total{release=~\"$release\"}[1m]))",
+          "legendFormat": "{{event}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Logs (release=$release)",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 16},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none"},
+      "targets": [
+        {"expr": "{service_name=\"agent-relay\"} | json | release=~\"$release\"", "refId": "A"}
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

@@ -3,9 +3,15 @@
 # uv's official image ships uv plus a matching CPython (3.11 per .python-version).
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
+# RELAY_RELEASE is a build arg, not a separately-patched env var. Baking it
+# into the image means a rollout undo restores the release label and the code
+# atomically -- there is no window where the image is healthy but the release
+# label still names the bad build.
+ARG RELAY_RELEASE=dev
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
+    RELAY_RELEASE=${RELAY_RELEASE} \
     RELAY_DATABASE_URL=sqlite:////data/agent-relay.db
 
 WORKDIR /app
@@ -19,13 +25,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Application source. `.dockerignore` keeps tests, git metadata, and the host
 # venv out of the build context.
-COPY main.py database.py storage.py schemas.py worker.py dashboard.py errors.py dashboard.html ./
+COPY main.py database.py storage.py schemas.py worker.py dashboard.py errors.py telemetry.py dashboard.html ./
 
 # Keep the SQLite queue on a volume so queued/processing tasks survive restarts.
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-EXPOSE 8000
+EXPOSE 8000 9464
 
 # /health is the documented liveness check and needs no credentials.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

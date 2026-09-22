@@ -100,3 +100,34 @@ running tests against another database.
 This starter intentionally does not include Docker, Kubernetes, CI, external
 brokers, an LLM, or a PostgreSQL implementation. Those are deployment and
 student-port concerns rather than part of the local relay protocol.
+
+## Operations and security loop
+
+This repository now also carries the deployment and incident-response loop:
+
+- **Instrumentation** — `telemetry.py` emits OpenTelemetry metrics, traces,
+  and structured logs, all labelled with `RELAY_RELEASE`. Secrets are
+  scrubbed before serialization.
+- **Telemetry stack** — `observability/` and `compose.yaml` run an
+  OpenTelemetry Collector feeding Prometheus, Loki, and Tempo, viewed together
+  in provisioned Grafana.
+- **Alerts** — `observability/prometheus/rules/agent-relay.yml` alerts on
+  user impact (5xx rate on a route), not on CPU, and carries release, route,
+  impact, runbook, and the evidence query in its payload.
+- **The responder** — `ops/` is a read-only, evidence-first first responder:
+  allowlisted queries (`ops/evidence.py`), a headless coding agent in a JSON
+  schema, an autonomy policy and allowlist enforced in code (`ops/policy.py`),
+  and a bounded `kubectl` executor. It holds no production admin credentials.
+- **Security audit** — `ops/security_audit.py` runs Semgrep plus an advisory
+  model review, and inventories the responder's capabilities and credentials.
+- **Incident loop** — `scripts/` breaks the app on purpose
+  (`break-app.sh`), deploys immutable releases (`deploy-release.sh`), and runs
+  the loop (`watch-incident.sh`, `respond.sh`, `run-incident.sh`).
+
+See **`docs/operations-and-security-report.md`** for a full reconstruction of
+one incident, and `docs/runbooks/agent-relay-errors.md` for the on-call
+runbook. Run the observability and responder tests with:
+
+```bash
+uv run pytest -q
+```

@@ -1,0 +1,58 @@
+# User-impact alerts.
+#
+# These deliberately do NOT alert on CPU/RAM. They alert on the symptom users
+# feel -- server errors on an endpoint -- and carry enough context in the
+# annotations and labels (release, route, baseline) to start investigating
+# without opening a dashboard first.
+groups:
+  - name: agent-relay-user-impact
+    rules:
+      # Fast burn: >20% of requests to an endpoint are 5xx over 1 minute.
+      - alert: AgentRelayHighErrorRate
+        expr: |
+          sum by (route, release) (rate(relay_http_requests_total{status=~"5.."}[1m]))
+            /
+          sum by (route, release) (rate(relay_http_requests_total[1m]))
+            > 0.2
+          and
+          sum by (route, release) (rate(relay_http_requests_total{status=~"5.."}[1m])) > 0.2
+        for: 30s
+        labels:
+          severity: critical
+          service: agent-relay
+        annotations:
+          summary: "{{ $labels.route }} is returning 5xx for {{ $labels.release }}"
+          impact: "Users hitting {{ $labels.route }} are receiving server errors (>20% of requests)."
+          current_error_ratio: '{{ printf "%.2f" $value }}'
+          runbook: "docs/runbooks/agent-relay-errors.md"
+          evidence: "prometheus:sum(rate(relay_http_requests_total{status=~\"5..\"}[5m])) by (route,release)"
+
+      # Absolute floor: any sustained 5xx even when traffic is too low to make
+      # a ratio meaningful (0.2 req/s ~= 12 errors/min).
+      - alert: AgentRelayErrorBurst
+        expr: |
+          sum by (route, release) (rate(relay_http_requests_total{status=~"5.."}[5m])) > 0.2
+        for: 1m
+        labels:
+          severity: warning
+          service: agent-relay
+        annotations:
+          summary: "Elevated 5xx on {{ $labels.route }} ({{ $labels.release }})"
+          impact: "{{ $labels.route }} is failing at {{ $value | printf \"%.2f\" }}/s."
+          runbook: "docs/runbooks/agent-relay-errors.md"
+
+      # Task lifecycle regression: work that used to complete is now failing.
+      - alert: AgentRelayTaskFailures
+        expr: |
+          sum by (release) (rate(relay_task_events_total{event="failed"}[5m]))
+            /
+          clamp_min(sum by (release) (rate(relay_task_events_total{event="completed"}[5m])), 0.01)
+            > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          service: agent-relay
+        annotations:
+          summary: "Task failure rate is elevated on {{ $labels.release }}"
+          impact: "A growing share of relayed tasks fail instead of completing."
+          runbook: "docs/runbooks/agent-relay-errors.md"

@@ -1,0 +1,18 @@
+# Local kind cluster for the observability exercise.
+#
+# extraPortMappings expose the Grafana/Prometheus/Alertmanager/incident-desk
+# UIs on the host so the stack can also run inside the cluster.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: agent-relay
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 3000
+        hostPort: 3000
+      - containerPort: 9090
+        hostPort: 9090
+      - containerPort: 9093
+        hostPort: 9093
+      - containerPort: 8099
+        hostPort: 8099

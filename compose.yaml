@@ -19,15 +19,25 @@ services:
       - "5432:5432"
 
   api:
-    build: .
+    build:
+      context: .
+      args:
+        RELAY_RELEASE: ${RELAY_RELEASE:-local-dev}
     image: agent-relay:local
     environment:
       # `postgres` is the Compose service name, resolvable on the stack's
       # network. The `+psycopg` dialect selects the installed psycopg 3 driver.
       RELAY_DATABASE_URL: postgresql+psycopg://relay:relay@postgres:5432/agentrelay
+      # OpenTelemetry: ship all three signals to the collector over OTLP/HTTP.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: agent-relay
+      RELAY_RELEASE: ${RELAY_RELEASE:-local-dev}
+      RELAY_ENVIRONMENT: ${RELAY_ENVIRONMENT:-local}
     depends_on:
       postgres:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     ports:
       - "8000:8000"
 
@@ -46,5 +56,112 @@ services:
       - ./test_agent_relay.py:/app/test_agent_relay.py:ro
     command: [".venv/bin/pytest", "-q", "test_agent_relay.py"]
 
+  # --------------------------------------------------------------------------
+  # Observability pipeline: OTLP in, Prometheus/Loki/Tempo behind it, Grafana
+  # in front. HOST_BIND defaults to loopback so the stack is not exposed on the
+  # LAN. Set HOST_BIND to the kind bridge gateway (e.g. 172.22.0.1) when the
+  # in-cluster app must export OTLP and the responder must read telemetry.
+  # --------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:4317:4317"
+      - "${HOST_BIND:-127.0.0.1}:4318:4318"
+      - "${HOST_BIND:-127.0.0.1}:8889:8889"
+    depends_on:
+      - tempo
+      - loki
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:9090:9090"
+    depends_on:
+      - otel-collector
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yaml
+    volumes:
+      - ./observability/alertmanager/alertmanager.yaml:/etc/alertmanager/alertmanager.yaml:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:9093:9093"
+
+  loki:
+    image: grafana/loki:3.4.2
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./observability/loki/loki.yaml:/etc/loki/local-config.yaml:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:3100:3100"
+
+  tempo:
+    image: grafana/tempo:2.7.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:3200:3200"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+  # The incident desk is the glue: it stores alert payloads as incidents and
+  # serves the bounded, read-only evidence-packet API the responder consumes.
+  incident-desk:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile
+    image: agent-relay-ops:local
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      TEMPO_URL: http://tempo:3200
+      GRAFANA_URL: http://grafana:3000
+      INCIDENT_STORE: /var/lib/incidents/incidents.db
+      INCIDENT_RESPONDER_CMD: "python -m ops.responder"
+    volumes:
+      - ./ops:/app/ops:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - incident-data:/var/lib/incidents
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:8099:8099"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8099/healthz',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+      - grafana
+
 volumes:
   postgres-data:
+  incident-data:

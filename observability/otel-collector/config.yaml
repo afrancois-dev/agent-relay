@@ -1,0 +1,77 @@
+# OpenTelemetry Collector: one vendor-neutral OTLP intake fanned out to the
+# three signal stores (Prometheus, Loki, Tempo) that Grafana reads.
+#
+# The API and the worker export OTLP/HTTP to 0.0.0.0:4318. The collector owns
+# all backend-specific knowledge, so the app never imports a Prometheus, Loki,
+# or Tempo client.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # Bound memory so a telemetry burst cannot take down the collector.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 2s
+    send_batch_size: 1024
+  # Nothing credential-shaped should ever reach the stores; drop obvious
+  # offenders and keep the join keys.
+  attributes/scrub:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: authorization
+        action: delete
+      - key: token
+        action: delete
+
+exporters:
+  # Traces -> Tempo (OTLP/gRPC).
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Metrics -> Prometheus scrape endpoint on the collector.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  # Logs -> Loki's OTLP endpoint (Loki 3.x native OTLP ingestion).
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, batch]
+      exporters: [otlphttp/loki, debug]

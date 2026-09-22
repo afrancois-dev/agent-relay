@@ -1,0 +1,96 @@
+# The responder runs in the agent-relay namespace with its own ServiceAccount.
+# It is deliberately NOT cluster-admin: it can read pods/deployments/events and
+# patch exactly one deployment. Secrets, exec, RBAC, and cluster scope are all
+# absent. That is the entire permission surface the model can influence.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-responder
+  namespace: agent-relay
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-responder
+  namespace: agent-relay
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # The bounded response: undo or restart the one deployment in this namespace.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["agent-relay"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["agent-relay"]
+    verbs: ["patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-responder
+  namespace: agent-relay
+subjects:
+  - kind: ServiceAccount
+    name: incident-responder
+    namespace: agent-relay
+roleRef:
+  kind: Role
+  name: incident-responder
+  apiGroup: rbac.authorization.k8s.io
+---
+# The responder pod runs the same ops image as the compose incident desk. It
+# points its read-only queries at the compose stack through the node's host
+# gateway, so there is one place to read telemetry from.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-responder
+  namespace: agent-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: incident-responder
+  template:
+    metadata:
+      labels:
+        app: incident-responder
+    spec:
+      serviceAccountName: incident-responder
+      containers:
+        - name: responder
+          image: agent-relay-ops:local
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          env:
+            - name: PROMETHEUS_URL
+              value: http://172.22.0.1:9090
+            - name: LOKI_URL
+              value: http://172.22.0.1:3100
+            - name: TEMPO_URL
+              value: http://172.22.0.1:3200
+            - name: GRAFANA_URL
+              value: http://172.22.0.1:3000
+            - name: INCIDENT_DESK_URL
+              value: http://172.22.0.1:8099
+            - name: K8S_NAMESPACE
+              value: agent-relay
+            - name: K8S_DEPLOYMENT
+              value: agent-relay
+            - name: ESCALATION_DIR
+              value: /var/lib/incidents/escalations
+          volumeMounts:
+            - name: escalations
+              mountPath: /var/lib/incidents
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      volumes:
+        - name: escalations
+          emptyDir: {}

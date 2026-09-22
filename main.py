@@ -28,6 +28,7 @@ from database import (
     MAX_PAGE_SIZE,
     RECOVERY_INTERVAL_SECONDS,
     db_session,
+    engine,
     init_db,
     recover_expired,
 )
@@ -57,6 +58,19 @@ from storage import (
     register_agent,
     task_for_participant,
 )
+from telemetry import (
+    SERVICE_VERSION,
+    configure_telemetry,
+    instrument_app,
+    instrument_engine,
+    record_error,
+    record_task_event,
+    request_observer_middleware,
+)
+
+
+configure_telemetry()
+instrument_engine(engine)
 
 
 LOGGER = logging.getLogger("agent_relay")
@@ -120,9 +134,14 @@ app = FastAPI(title="Agent Relay", version="0.1.0", lifespan=lifespan)
 # initialize the schema at import as well as during normal application startup.
 init_db()
 
+app.middleware("http")(request_observer_middleware())
+instrument_app(app)
+
 
 @app.exception_handler(RelayError)
-async def relay_error_handler(_request: Request, exc: RelayError) -> JSONResponse:
+async def relay_error_handler(request: Request, exc: RelayError) -> JSONResponse:
+    if exc.status_code >= 500:
+        record_error(request.url.path, exc.code)
     return error_response(exc.code, exc.message, exc.status_code)
 
 
@@ -149,7 +168,7 @@ async def body_size_limit(request: Request, call_next):
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "release": SERVICE_VERSION}
 
 
 @app.get("/ready")
@@ -163,8 +182,8 @@ async def ready() -> JSONResponse:
             db.execute(text("SELECT 1 FROM tasks LIMIT 1"))
             db.execute(text("SELECT 1 FROM attempts LIMIT 1"))
     except Exception:
-        return JSONResponse(status_code=503, content={"status": "not_ready"})
-    return JSONResponse(status_code=200, content={"status": "ready"})
+        return JSONResponse(status_code=503, content={"status": "not_ready", "release": SERVICE_VERSION})
+    return JSONResponse(status_code=200, content={"status": "ready", "release": SERVICE_VERSION})
 
 
 @app.post("/api/v1/agents", status_code=201)
@@ -208,6 +227,7 @@ async def tasks_create(
     for retry in range(3):
         try:
             result = create_task(current.id, body.to, body.input, idempotency_key)
+            record_task_event("created")
             return JSONResponse(status_code=201, content=result)
         except OperationalError as exc:
             if retry == 2 or "locked" not in str(exc).lower():
@@ -230,6 +250,7 @@ async def claim(
                 raise
             result = None
         if result is not None:
+            record_task_event("claimed")
             return JSONResponse(status_code=200, content=result)
         remaining = deadline - time.monotonic()
         if body.wait_seconds == 0 or remaining <= 0:
@@ -255,7 +276,9 @@ async def task_complete(
     task_id: str = FastAPIPath(..., min_length=1, max_length=100),
     current=Depends(current_agent),
 ) -> dict[str, str]:
-    return commit_terminal(task_id, current.id, body.claim_token, action="complete", value=body.output)
+    result = commit_terminal(task_id, current.id, body.claim_token, action="complete", value=body.output)
+    record_task_event("completed")
+    return result
 
 
 @app.post("/api/v1/tasks/{task_id}/fail")
@@ -264,7 +287,9 @@ async def task_fail(
     task_id: str = FastAPIPath(..., min_length=1, max_length=100),
     current=Depends(current_agent),
 ) -> dict[str, str]:
-    return commit_terminal(task_id, current.id, body.claim_token, action="fail", value=body.error)
+    result = commit_terminal(task_id, current.id, body.claim_token, action="fail", value=body.error)
+    record_task_event("failed")
+    return result
 
 
 @app.get("/api/v1/tasks/{task_id}")
